@@ -11,6 +11,8 @@ import (
 	"github.com/netsampler/goflow2/v2/decoders/utils"
 	flowmessage "github.com/netsampler/goflow2/v2/pb"
 	"github.com/netsampler/goflow2/v2/producer"
+
+	// Imports related to sflow decoding specifically
 )
 
 type SamplingRateSystem interface {
@@ -460,20 +462,21 @@ func ConvertNetFlowDataSet(flowMessage *ProtoProducerMessage, version uint16, ba
 			if err := DecodeUNumber(v, &(flowMessage.DstMac)); err != nil {
 				return err
 			}
-		case netflow.NFV9_FIELD_OUT_SRC_MAC:
-			if err := DecodeUNumber(v, &(flowMessage.SrcMac)); err != nil {
+		case netflow.NFV9_FIELD_OUT_SRC_MAC: // ID 81 (also IPFIX postSourceMacAddress)
+			// Use this field for PostSrcMac for both IPFIX and NetFlow v9
+			if err := DecodeUNumber(v, &(flowMessage.PostSrcMac)); err != nil {
 				return err
 			}
-		case netflow.NFV9_FIELD_OUT_DST_MAC:
-			if err := DecodeUNumber(v, &(flowMessage.DstMac)); err != nil {
+		case netflow.NFV9_FIELD_OUT_DST_MAC: // ID 57 (also IPFIX postDestinationMacAddress)
+			// Use this field for PostDstMac for both IPFIX and NetFlow v9
+			if err := DecodeUNumber(v, &(flowMessage.PostDstMac)); err != nil {
 				return err
 			}
-
 		case netflow.NFV9_FIELD_SRC_VLAN:
-			if err := DecodeUNumber(v, &(flowMessage.VlanId)); err != nil {
+			if err := DecodeUNumber(v, &(flowMessage.SrcVlan)); err != nil {
 				return err
 			}
-			if err := DecodeUNumber(v, &(flowMessage.SrcVlan)); err != nil {
+			if err := DecodeUNumber(v, &(flowMessage.VlanId)); err != nil {
 				return err
 			}
 		case netflow.NFV9_FIELD_DST_VLAN:
@@ -538,6 +541,52 @@ func ConvertNetFlowDataSet(flowMessage *ProtoProducerMessage, version uint16, ba
 			flowMessage.MplsIp = append(flowMessage.MplsIp, v)
 		case netflow.IPFIX_FIELD_mplsTopLabelIPv6Address:
 			flowMessage.MplsIp = append(flowMessage.MplsIp, v)
+
+		case netflow.NFV9_FIELD_FIRST_SWITCHED:
+			var timeMs uint32
+			if err := DecodeUNumber(v, &timeMs); err != nil {
+				return err
+			}
+			// timeMs and uptime are milliseconds since boot. baseTime is epoch seconds.
+			deltaMs := int64(timeMs) - int64(uptime)
+			flowMessage.TimeFlowStartNs = baseTimeNs - uint64(deltaMs)*1e6
+		case netflow.NFV9_FIELD_LAST_SWITCHED:
+			var timeMs uint32
+			if err := DecodeUNumber(v, &timeMs); err != nil {
+				return err
+			}
+			// timeMs and uptime are milliseconds since boot. baseTime is epoch seconds.
+			deltaMs := int64(timeMs) - int64(uptime)
+			flowMessage.TimeFlowEndNs = baseTimeNs - uint64(deltaMs)*1e6
+		case netflow.NFV9_FIELD_SAMPLING_INTERVAL:
+			if err := DecodeUNumber(v, &(flowMessage.SamplingRate)); err != nil {
+				return err
+			}
+
+		// Post-NAT fields (potentially in v9 extensions or IPFIX)
+		case netflow.IPFIX_FIELD_postNATSourceIPv4Address: // ID 225 -> postNATSourceIPv4Address (IP) as per user standard
+			// Store the raw bytes for IP address
+			addrReplaceCheck(&(flowMessage.PostNatSrcAddr), v, &(flowMessage.Etype), false)
+		case netflow.IPFIX_FIELD_postNATDestinationIPv4Address: // ID 226 -> postNATDestinationIPv4Address (IP) as per user standard
+			// Store the raw bytes for IP address
+			addrReplaceCheck(&(flowMessage.PostNatDstAddr), v, &(flowMessage.Etype), false)
+		case netflow.IPFIX_FIELD_postNAPTSourceTransportPort: // ID 227 -> postNAPTSourceTransportPort (Port) as per user standard
+			if err := DecodeUNumber(v, &flowMessage.PostNaptSrcPort); err != nil {
+				return err
+			}
+		case netflow.IPFIX_FIELD_postNAPTDestinationTransportPort: // ID 228 -> postNAPTDestinationTransportPort (Port) as per user standard
+			if err := DecodeUNumber(v, &flowMessage.PostNaptDstPort); err != nil {
+				return err
+			}
+		// Additional field IDs for post-NAT MAC addresses (if used by your implementation)
+		case 229: // Alternative ID for postNATSourceMacAddress
+			if err := DecodeUNumber(v, &flowMessage.PostSrcMac); err != nil {
+				return err
+			}
+		case 230: // Alternative ID for postNATDestinationMacAddress
+			if err := DecodeUNumber(v, &flowMessage.PostDstMac); err != nil {
+				return err
+			}
 
 		default:
 			if version == 9 {

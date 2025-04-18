@@ -95,6 +95,14 @@ message FlowMessage {
   uint32 observation_domain_id = 70;
   uint32 observation_point_id = 71;
 
+  // Post-NAT fields (IPFIX)
+  bytes post_nat_src_addr = 120;
+  bytes post_nat_dst_addr = 121;
+  uint32 post_napt_src_port = 122;
+  uint32 post_napt_dst_port = 123;
+  uint64 post_src_mac = 124;
+  uint64 post_dst_mac = 125;
+
   // Encapsulation
   enum LayerStack {
     Ethernet = 0;

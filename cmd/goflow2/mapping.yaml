@@ -25,6 +25,13 @@ formatter:
     # additional fields
     - icmp_name # virtual column
     - csum # udp checksum
+    # Post NAT fields
+    - post_nat_src_addr
+    - post_nat_dst_addr
+    - post_napt_src_port
+    - post_napt_dst_port
+    - post_src_mac
+    - post_dst_mac
   key:
     - sampler_address
   protobuf: # manual protobuf fields addition
@@ -45,6 +52,8 @@ formatter:
       type: varint
   render:
     time_received_ns: datetimenano
+    post_nat_src_addr: ip
+    post_nat_dst_addr: ip
 # Decoder mappings
 ipfix:
   mapping:

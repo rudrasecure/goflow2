@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/netsampler/goflow2/v2/decoders/utils"
 )
@@ -435,6 +436,7 @@ func DecodeMessageCommonFlowSet(payload *bytes.Buffer, templates NetFlowTemplate
 			}
 			flowSet = datafs
 		case NFv9OptionsTemplateRecord:
+			log.Printf("Using NFv9OptionsTemplateRecord (ID: %d, ObsDomain: %d) for decoding data: Scopes=%+v Options=%+v", fsheader.Id, obsDomainId, templatec.Scopes, templatec.Options)
 			records, err := DecodeOptionsDataSet(version, dataReader, templatec.Scopes, templatec.Options)
 			if err != nil {
 				return flowSet, &FlowError{version, "OptionDataSet", obsDomainId, fsheader.Id, err}

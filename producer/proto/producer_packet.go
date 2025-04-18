@@ -30,7 +30,7 @@ var (
 		false,
 	}
 	parserPayload = ParserInfo{
-		nil,
+		nil, //ParsePayload2,
 		"payload",
 		[]string{"payload", "7"},
 		100,
@@ -260,7 +260,7 @@ func (e *BaseParserEnvironment) RegisterPort(proto string, dir RegPortDir, port 
 
 func (e *BaseParserEnvironment) NextParserEtype(etherType []byte) (ParserInfo, error) {
 	info, err := e.innerNextParserEtype(etherType)
-	etypeNum := uint16(etherType[0]<<8) | uint16(etherType[1])
+	etypeNum := binary.BigEndian.Uint16(etherType)
 	info.ConfigKeyList = append(info.ConfigKeyList, fmt.Sprintf("etype%d", etypeNum), fmt.Sprintf("etype0x%.4x", etypeNum))
 	return info, err
 }
@@ -270,7 +270,7 @@ func (e *BaseParserEnvironment) innerNextParserEtype(etherType []byte) (ParserIn
 		return parserNone, fmt.Errorf("wrong ether type")
 	}
 
-	eType := uint16(etherType[0])<<8 | uint16(etherType[1])
+	eType := binary.BigEndian.Uint16(etherType)
 	if cParser, ok := e.customEtype.Load(eType); ok {
 		return cParser.(ParserInfo), nil
 	}
