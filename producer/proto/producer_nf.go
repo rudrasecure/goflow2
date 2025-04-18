@@ -570,6 +570,12 @@ func ConvertNetFlowDataSet(flowMessage *ProtoProducerMessage, version uint16, ba
 		case netflow.IPFIX_FIELD_postNATDestinationIPv4Address: // ID 226 -> postNATDestinationIPv4Address (IP) as per user standard
 			// Store the raw bytes for IP address
 			addrReplaceCheck(&(flowMessage.PostNatDstAddr), v, &(flowMessage.Etype), false)
+		case netflow.IPFIX_FIELD_postNATSourceIPv6Address: // ID 281 -> postNATSourceIPv6Address (IPv6) as per IPFIX standard
+			// Store the raw bytes for IPv6 address
+			addrReplaceCheck(&(flowMessage.PostNatSrcAddr), v, &(flowMessage.Etype), true)
+		case netflow.IPFIX_FIELD_postNATDestinationIPv6Address: // ID 282 -> postNATDestinationIPv6Address (IPv6) as per IPFIX standard
+			// Store the raw bytes for IPv6 address
+			addrReplaceCheck(&(flowMessage.PostNatDstAddr), v, &(flowMessage.Etype), true)
 		case netflow.IPFIX_FIELD_postNAPTSourceTransportPort: // ID 227 -> postNAPTSourceTransportPort (Port) as per user standard
 			if err := DecodeUNumber(v, &flowMessage.PostNaptSrcPort); err != nil {
 				return err
