@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,6 +15,19 @@ import (
 	"time"
 )
 
+// hexToMAC converts a hex string like "04f41c4fbba1" to "04:f4:1c:4f:bb:a1"
+func hexToMAC(h string) string {
+	h = strings.TrimPrefix(h, "0x")
+	if len(h) != 12 {
+		return h
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return h
+	}
+	return net.HardwareAddr(b).String()
+}
+
 // Configuration for the aggregator
 type Config struct {
 	InputLogFile      string
@@ -21,43 +35,46 @@ type Config struct {
 	AggregationPeriod time.Duration
 }
 
-// NetFlowRecord represents a parsed NetFlow record from the JSON log
+// NetFlowRecord represents a parsed NetFlow record from the JSON log.
+// Field names match the prod goflow2-mapping.yaml output.
 type NetFlowRecord struct {
-	Type               string   `json:"type"`
-	TimeReceivedNs     int64    `json:"time_received_ns"`
-	SrcAddr            string   `json:"src_addr"`
-	DstAddr            string   `json:"dst_addr"`
-	SrcPort            int      `json:"src_port"`
-	DstPort            int      `json:"dst_port"`
-	PostNatSrcAddr     string   `json:"post_nat_src_addr"`
-	PostNatDstAddr     string   `json:"post_nat_dst_addr"`
-	PostSrcMac         string   `json:"post_src_mac"`
-	PostDstMac         string   `json:"post_dst_mac"`
-	Bytes              int64    `json:"bytes"`
-	Packets            int64    `json:"packets"`
-	Proto              string   `json:"proto"`
-	InIf               int      `json:"in_if"`
-	OutIf              int      `json:"out_if"`
-	SamplingRate       int      `json:"sampling_rate"`
-	TimeFlowStartNs    int64    `json:"time_flow_start_ns"`
-	TimeFlowEndNs      int64    `json:"time_flow_end_ns"`
+	Type               string `json:"type"`
+	TimeReceivedNs     string `json:"time_received_ns"`
+	SamplerAddress     string `json:"sampler_address"`
+	SrcAddr            string `json:"src_addr"`
+	DstAddr            string `json:"dst_addr"`
+	SrcPort            int    `json:"src_port"`
+	DstPort            int    `json:"dst_port"`
+	PostNatSrcAddr     string `json:"post_nat_source_ipv4_address"`
+	PostNatDstAddr     string `json:"post_nat_destination_ipv4_address"`
+	PostSourceMac      string `json:"post_source_mac_address"`
+	PostDestinationMac string `json:"post_destination_mac_address"`
+	InDstMac           string `json:"in_dst_mac"`
+	Bytes              int64  `json:"bytes"`
+	Packets            int64  `json:"packets"`
+	Proto              string `json:"proto"`
+	InIf               int    `json:"in_if"`
+	OutIf              int    `json:"out_if"`
+	SamplingRate       int    `json:"sampling_rate"`
+	TimeFlowStartNs    string `json:"time_flow_start_ns"`
+	TimeFlowEndNs      string `json:"time_flow_end_ns"`
 }
 
 // AggregatedRecord represents an aggregated NetFlow record
 type AggregatedRecord struct {
-	AggregationKey    string    `json:"aggregation_key"`
-	SrcAddr           string    `json:"src_addr"`
-	DstAddr           string    `json:"dst_addr"`
-	Port              int       `json:"port"`
-	PostSrcMac        string    `json:"post_src_mac"`
-	PostDstMac        string    `json:"post_dst_mac"`
-	TotalBytes        int64     `json:"total_bytes"`
-	TotalPackets      int64     `json:"total_packets"`
-	FlowCount         int       `json:"flow_count"`
-	FirstSeenTime     time.Time `json:"first_seen_time"`
-	LastSeenTime      time.Time `json:"last_seen_time"`
-	Proto             string    `json:"proto"`
-	Direction         string    `json:"direction"` // "inbound" or "outbound"
+	SrcAddr        string    `json:"src_addr"`
+	DstAddr        string    `json:"dst_addr"`
+	Port           int       `json:"port"`
+	Direction      string    `json:"direction"`
+	WanMac         string    `json:"wan_mac"`
+	LanMac         string    `json:"lan_mac"`
+	TotalBytes     int64     `json:"total_bytes"`
+	TotalPackets   int64     `json:"total_packets"`
+	FlowCount      int       `json:"flow_count"`
+	Proto          string    `json:"proto"`
+	SamplerAddress string    `json:"sampler_address"`
+	FirstSeenTime  time.Time `json:"first_seen_time"`
+	LastSeenTime   time.Time `json:"last_seen_time"`
 }
 
 // Aggregator handles the aggregation of NetFlow records
@@ -109,88 +126,100 @@ func (a *Aggregator) determineEffectiveDstAddr(record *NetFlowRecord) string {
 	return record.DstAddr
 }
 
-// determinePort determines which port to use based on traffic direction
-func (a *Aggregator) determinePort(record *NetFlowRecord) (int, string) {
+// determineDirection determines traffic direction and the service port.
+func (a *Aggregator) determineDirection(record *NetFlowRecord) (int, string) {
 	srcIsPrivate := a.isPrivateIP(record.SrcAddr)
 	dstIsPrivate := a.isPrivateIP(a.determineEffectiveDstAddr(record))
 
-	// If both source and destination are private, we'll skip this record
+	// Both private = internal traffic, skip
 	if srcIsPrivate && dstIsPrivate {
 		return 0, ""
 	}
 
-	// Outbound traffic: source is private, destination is public
+	// Outbound: source is private, destination is public
 	if srcIsPrivate && !dstIsPrivate {
 		return record.DstPort, "outbound"
 	}
 
-	// Inbound traffic: source is public, destination is private
+	// Inbound: source is public, destination is private
 	if !srcIsPrivate && dstIsPrivate {
 		return record.SrcPort, "inbound"
 	}
 
-	// Both public (unusual case) - default to destination port
+	// Both public (unusual) - default to destination port
 	return record.DstPort, "unknown"
 }
 
+// deriveWanLanMac computes wan_mac and lan_mac from post_source_mac (field 81)
+// and in_dst_mac (field 80) based on traffic direction, matching prod logic:
+//   - field 81 (post_source_mac) = egress interface MAC
+//   - field 80 (in_dst_mac)      = ingress interface MAC
+//   - Outbound: ingress=LAN, egress=WAN → wan=field81, lan=field80
+//   - Inbound:  ingress=WAN, egress=LAN → wan=field80, lan=field81
+func deriveWanLanMac(direction, postSourceMac, inDstMac string) (wanMac, lanMac string) {
+	switch direction {
+	case "outbound":
+		return postSourceMac, inDstMac
+	case "inbound":
+		return inDstMac, postSourceMac
+	default:
+		return "", ""
+	}
+}
+
 // createAggregationKey creates a unique key for aggregation
-func (a *Aggregator) createAggregationKey(record *NetFlowRecord, port int) string {
-	effectiveDstAddr := a.determineEffectiveDstAddr(record)
-	return fmt.Sprintf("%s|%s|%d|%s|%s", 
-		record.SrcAddr, 
-		effectiveDstAddr, 
-		port, 
-		record.PostSrcMac, 
-		record.PostDstMac)
+func createAggregationKey(srcAddr, dstAddr string, port int, direction, wanMac, lanMac string) string {
+	return fmt.Sprintf("%s|%s|%d|%s|%s|%s",
+		srcAddr,
+		dstAddr,
+		port,
+		direction,
+		wanMac,
+		lanMac)
 }
 
 // processRecord processes a single NetFlow record
 func (a *Aggregator) processRecord(record *NetFlowRecord) {
-	port, direction := a.determinePort(record)
-	if direction == "" {
-		// Skip records where both IPs are private
+	port, direction := a.determineDirection(record)
+	if direction != "inbound" && direction != "outbound" {
 		return
 	}
 
-	key := a.createAggregationKey(record, port)
 	effectiveDstAddr := a.determineEffectiveDstAddr(record)
-	
+	wanMac, lanMac := deriveWanLanMac(direction, hexToMAC(record.PostSourceMac), hexToMAC(record.InDstMac))
+	key := createAggregationKey(record.SrcAddr, effectiveDstAddr, port, direction, wanMac, lanMac)
+
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	// Create or update the aggregated record
-	if _, exists := a.aggregatedFlows[key]; !exists {
+	recordTime, _ := time.Parse(time.RFC3339Nano, record.TimeReceivedNs)
+
+	if existing, ok := a.aggregatedFlows[key]; !ok {
 		a.aggregatedFlows[key] = &AggregatedRecord{
-			AggregationKey: key,
 			SrcAddr:        record.SrcAddr,
 			DstAddr:        effectiveDstAddr,
 			Port:           port,
-			PostSrcMac:     record.PostSrcMac,
-			PostDstMac:     record.PostDstMac,
+			Direction:      direction,
+			WanMac:         wanMac,
+			LanMac:         lanMac,
 			TotalBytes:     record.Bytes,
 			TotalPackets:   record.Packets,
 			FlowCount:      1,
-			FirstSeenTime:  time.Unix(0, record.TimeReceivedNs),
-			LastSeenTime:   time.Unix(0, record.TimeReceivedNs),
 			Proto:          record.Proto,
-			Direction:      direction,
+			SamplerAddress: record.SamplerAddress,
+			FirstSeenTime:  recordTime,
+			LastSeenTime:   recordTime,
 		}
 	} else {
-		// Update existing record
-		aggRecord := a.aggregatedFlows[key]
-		aggRecord.TotalBytes += record.Bytes
-		aggRecord.TotalPackets += record.Packets
-		aggRecord.FlowCount++
-		
-		// Update first seen time if this record is older
-		recordTime := time.Unix(0, record.TimeReceivedNs)
-		if recordTime.Before(aggRecord.FirstSeenTime) {
-			aggRecord.FirstSeenTime = recordTime
+		existing.TotalBytes += record.Bytes
+		existing.TotalPackets += record.Packets
+		existing.FlowCount++
+
+		if recordTime.Before(existing.FirstSeenTime) {
+			existing.FirstSeenTime = recordTime
 		}
-		
-		// Update last seen time if this record is newer
-		if recordTime.After(aggRecord.LastSeenTime) {
-			aggRecord.LastSeenTime = recordTime
+		if recordTime.After(existing.LastSeenTime) {
+			existing.LastSeenTime = recordTime
 		}
 	}
 }
@@ -267,6 +296,12 @@ func (a *Aggregator) writeAggregatedData() error {
 
 	// Clear the aggregated flows after writing
 	a.aggregatedFlows = make(map[string]*AggregatedRecord)
+
+	// Truncate the raw flow log to free disk space
+	if err := os.Truncate(a.config.InputLogFile, 0); err != nil {
+		log.Printf("Warning: failed to truncate input log: %v", err)
+	}
+	a.lastProcessedPos = 0
 
 	return nil
 }

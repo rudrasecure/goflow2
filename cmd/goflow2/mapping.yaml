@@ -1,3 +1,6 @@
+# GoFlow2 Custom Mapping Configuration
+# This adds support for NAT-related IPFIX fields that are not natively supported
+
 formatter:
   fields: # list of fields to format in JSON
     - type
@@ -22,16 +25,31 @@ formatter:
     - out_if
     - src_mac
     - dst_mac
-    # additional fields
-    - icmp_name # virtual column
-    - csum # udp checksum
-    # Post NAT fields
-    - post_nat_src_addr
-    - post_nat_dst_addr
-    - post_napt_src_port
-    - post_napt_dst_port
-    - post_src_mac
-    - post_dst_mac
+    - src_vlan
+    - dst_vlan
+    - ip_tos
+    - ip_ttl
+    - tcp_flags
+    - icmp_type
+    - icmp_code
+    - next_hop
+    - next_hop_as
+    - src_as
+    - dst_as
+    - forwarding_status
+    - observation_domain_id
+    - observation_point_id
+    # NAT-related fields (custom additions)
+    - post_nat_source_ipv4_address
+    - post_nat_destination_ipv4_address
+    - post_nat_source_ipv6_address
+    - post_nat_destination_ipv6_address
+    - post_napt_source_transport_port
+    - post_napt_destination_transport_port
+    - post_source_mac_address
+    - post_destination_mac_address
+    - nat_event
+    - in_dst_mac
   key:
     - sampler_address
   protobuf: # manual protobuf fields addition
@@ -47,16 +65,51 @@ formatter:
     - name: egress_vrf_id
       index: 40
       type: varint
-    - name: csum
-      index: 999
+    # NAT fields - using high index numbers to avoid conflicts
+    - name: post_nat_source_ipv4_address
+      index: 200
+      type: bytes
+    - name: post_nat_destination_ipv4_address
+      index: 201
+      type: bytes
+    - name: post_nat_source_ipv6_address
+      index: 202
+      type: bytes
+    - name: post_nat_destination_ipv6_address
+      index: 203
+      type: bytes
+    - name: post_napt_source_transport_port
+      index: 204
       type: varint
+    - name: post_napt_destination_transport_port
+      index: 205
+      type: varint
+    - name: post_source_mac_address
+      index: 206
+      type: bytes
+    - name: post_destination_mac_address
+      index: 207
+      type: bytes
+    - name: nat_event
+      index: 208
+      type: varint
+    - name: in_dst_mac
+      index: 209
+      type: bytes
   render:
     time_received_ns: datetimenano
-    post_nat_src_addr: ip
-    post_nat_dst_addr: ip
-# Decoder mappings
+    time_flow_start_ns: datetimenano
+    time_flow_end_ns: datetimenano
+    post_nat_source_ipv4_address: ip
+    post_nat_destination_ipv4_address: ip
+    post_nat_source_ipv6_address: ip
+    post_nat_destination_ipv6_address: ip
+
+# IPFIX Element ID Mappings
+# Reference: https://www.iana.org/assignments/ipfix/ipfix.xhtml
 ipfix:
   mapping:
+    # Standard fields
     - field: 61
       destination: flow_direction
     - field: 239
@@ -65,6 +118,40 @@ ipfix:
       destination: ingress_vrf_id
     - field: 235
       destination: egress_vrf_id
+    # NAT-related IPFIX elements
+    # 225: postNATSourceIPv4Address
+    - field: 225
+      destination: post_nat_source_ipv4_address
+    # 226: postNATDestinationIPv4Address
+    - field: 226
+      destination: post_nat_destination_ipv4_address
+    # 227: postNAPTSourceTransportPort
+    - field: 227
+      destination: post_napt_source_transport_port
+    # 228: postNAPTDestinationTransportPort
+    - field: 228
+      destination: post_napt_destination_transport_port
+    # 230: natEvent
+    - field: 230
+      destination: nat_event
+    # 281: postNATSourceIPv6Address
+    - field: 281
+      destination: post_nat_source_ipv6_address
+    # 282: postNATDestinationIPv6Address
+    - field: 282
+      destination: post_nat_destination_ipv6_address
+    # 80: destinationMacAddress (ingress dest = router's own ingress interface MAC) - RFC 5102
+    # GoFlow2 merges field 80 into built-in dst_mac, but field 57 overwrites it.
+    # We capture field 80 separately so WAN/LAN interface lookup works correctly.
+    - field: 80
+      destination: in_dst_mac
+    # 81: postSourceMacAddress (after routing/middlebox) - RFC 5102
+    - field: 81
+      destination: post_source_mac_address
+    # 57: postDestinationMacAddress (after routing/middlebox) - RFC 5102
+    - field: 57
+      destination: post_destination_mac_address
+
 netflowv9:
   mapping:
     - field: 34 # samplingInterval provided within the template
@@ -72,26 +159,27 @@ netflowv9:
       endian: little
     - field: 61
       destination: flow_direction
-sflow:
-  ports:
-    - proto: "udp"
-      dir: "dst"
-      port: 3544
-      parser: "teredo-dst"
-    - proto: "udp"
-      dir: "both"
-      port: 4754
-      parser: "gre"
-    - proto: "udp"
-      dir: "both"
-      port: 6081
-      parser: "geneve"
-  mapping:
-    - layer: "udp"
-      offset: 48
-      length: 16
-      destination: csum
-    - layer: "tcp"
-      offset: 128
-      length: 16
-      destination: csum
+    # NetFlow v9 also has NAT fields (same IDs)
+    - field: 225
+      destination: post_nat_source_ipv4_address
+    - field: 226
+      destination: post_nat_destination_ipv4_address
+    - field: 227
+      destination: post_napt_source_transport_port
+    - field: 228
+      destination: post_napt_destination_transport_port
+    - field: 230
+      destination: nat_event
+    # IPv6 NAT fields (for future-proofing and consistency with IPFIX)
+    - field: 281
+      destination: post_nat_source_ipv6_address
+    - field: 282
+      destination: post_nat_destination_ipv6_address
+    # 80: destinationMacAddress (ingress dest = router's own ingress interface MAC)
+    - field: 80
+      destination: in_dst_mac
+    # Post-routing MAC addresses (after NAT/routing middlebox)
+    - field: 81
+      destination: post_source_mac_address
+    - field: 57
+      destination: post_destination_mac_address

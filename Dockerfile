@@ -1,4 +1,4 @@
-FROM golang:alpine as builder
+FROM golang:alpine AS builder
 ARG LDFLAGS=""
 
 RUN apk --update --no-cache add git build-base gcc
@@ -34,9 +34,10 @@ RUN apk update --no-cache && \
     adduser -S -D -H -h / flow && \
     apk add --no-cache supervisor
 
-# Copy binaries from builder
+# Copy binaries and config from builder
 COPY --from=builder /build/goflow2 /
 COPY --from=builder /build/aggregator /
+COPY --from=builder /build/cmd/goflow2/mapping.yaml /etc/goflow2/mapping.yaml
 
 # Set up supervisord configuration
 RUN mkdir -p /etc/supervisor/conf.d

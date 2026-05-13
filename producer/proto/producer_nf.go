@@ -11,7 +11,6 @@ import (
 	"github.com/netsampler/goflow2/v2/decoders/utils"
 	flowmessage "github.com/netsampler/goflow2/v2/pb"
 	"github.com/netsampler/goflow2/v2/producer"
-
 	// Imports related to sflow decoding specifically
 )
 
@@ -584,16 +583,6 @@ func ConvertNetFlowDataSet(flowMessage *ProtoProducerMessage, version uint16, ba
 			if err := DecodeUNumber(v, &flowMessage.PostNaptDstPort); err != nil {
 				return err
 			}
-		// Additional field IDs for post-NAT MAC addresses (if used by your implementation)
-		case 229: // Alternative ID for postNATSourceMacAddress
-			if err := DecodeUNumber(v, &flowMessage.PostSrcMac); err != nil {
-				return err
-			}
-		case 230: // Alternative ID for postNATDestinationMacAddress
-			if err := DecodeUNumber(v, &flowMessage.PostDstMac); err != nil {
-				return err
-			}
-
 		default:
 			if version == 9 {
 				// NetFlow v9 time works with a differential based on router's uptime
