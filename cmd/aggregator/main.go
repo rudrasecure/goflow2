@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -9,7 +10,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +31,7 @@ func hexToMAC(h string) string {
 // Configuration for the aggregator
 type Config struct {
 	InputLogFile      string
-	OutputLogFile     string
+	OutputDir         string
 	AggregationPeriod time.Duration
 }
 
@@ -266,35 +266,59 @@ func (a *Aggregator) processLogFile() error {
 	return nil
 }
 
-// writeAggregatedData writes the aggregated data to the output file
+// writeAggregatedData writes aggregated data as an atomic gzip file.
+// Writes to a .tmp file first, then renames to .json.gz so consumers
+// never see incomplete files.
 func (a *Aggregator) writeAggregatedData() error {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
 	if len(a.aggregatedFlows) == 0 {
-		return nil // Nothing to write
+		return nil
 	}
 
-	// Ensure directory exists
-	dir := filepath.Dir(a.config.OutputLogFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(a.config.OutputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 
-	file, err := os.OpenFile(a.config.OutputLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open output file: %v", err)
-	}
-	defer file.Close()
+	ts := time.Now().UTC().Format("20060102_150405")
+	finalPath := fmt.Sprintf("%s/aggregated.%s.json.gz", a.config.OutputDir, ts)
+	tmpPath := finalPath + ".tmp"
 
-	encoder := json.NewEncoder(file)
+	file, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %v", err)
+	}
+
+	gz, _ := gzip.NewWriterLevel(file, gzip.BestSpeed)
+	encoder := json.NewEncoder(gz)
 	for _, record := range a.aggregatedFlows {
 		if err := encoder.Encode(record); err != nil {
+			gz.Close()
+			file.Close()
+			os.Remove(tmpPath)
 			return fmt.Errorf("failed to encode record: %v", err)
 		}
 	}
 
-	// Clear the aggregated flows after writing
+	if err := gz.Close(); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close gzip writer: %v", err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync file: %v", err)
+	}
+	file.Close()
+
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to rename temp file: %v", err)
+	}
+
+	log.Printf("Wrote %s (%d records)", finalPath, len(a.aggregatedFlows))
 	a.aggregatedFlows = make(map[string]*AggregatedRecord)
 
 	// Truncate the raw flow log to free disk space
@@ -311,8 +335,8 @@ func (a *Aggregator) Run() {
 	ticker := time.NewTicker(a.config.AggregationPeriod)
 	defer ticker.Stop()
 
-	log.Printf("Starting NetFlow aggregator. Input: %s, Output: %s, Period: %v",
-		a.config.InputLogFile, a.config.OutputLogFile, a.config.AggregationPeriod)
+	log.Printf("Starting NetFlow aggregator. Input: %s, OutputDir: %s, Period: %v",
+		a.config.InputLogFile, a.config.OutputDir, a.config.AggregationPeriod)
 
 	for range ticker.C {
 		if err := a.processLogFile(); err != nil {
@@ -330,7 +354,7 @@ func main() {
 
 	// Parse command line flags
 	flag.StringVar(&config.InputLogFile, "input", "/var/log/flow.log", "Input NetFlow log file")
-	flag.StringVar(&config.OutputLogFile, "output", "/var/log/aggregated_flow.log", "Output aggregated log file")
+	flag.StringVar(&config.OutputDir, "output-dir", "/var/log/flows", "Output directory for gzip files")
 	periodMinutes := flag.Int("period", 5, "Aggregation period in minutes")
 	flag.Parse()
 
