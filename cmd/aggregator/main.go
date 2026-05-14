@@ -10,6 +10,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,7 @@ type Config struct {
 	InputLogFile      string
 	OutputDir         string
 	AggregationPeriod time.Duration
+	MaxOutputDirBytes int64
 }
 
 // NetFlowRecord represents a parsed NetFlow record from the JSON log.
@@ -266,6 +269,61 @@ func (a *Aggregator) processLogFile() error {
 	return nil
 }
 
+// enforceOutputQuota removes oldest .json.gz files until total size is under the limit.
+func (a *Aggregator) enforceOutputQuota() {
+	if a.config.MaxOutputDirBytes <= 0 {
+		return
+	}
+
+	entries, err := os.ReadDir(a.config.OutputDir)
+	if err != nil {
+		return
+	}
+
+	type fileEntry struct {
+		path string
+		size int64
+		name string
+	}
+
+	var files []fileEntry
+	var totalSize int64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json.gz") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileEntry{
+			path: filepath.Join(a.config.OutputDir, e.Name()),
+			size: info.Size(),
+			name: e.Name(),
+		})
+		totalSize += info.Size()
+	}
+
+	if totalSize <= a.config.MaxOutputDirBytes {
+		return
+	}
+
+	// Sort oldest first (filenames contain timestamps, so lexicographic = chronological)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].name < files[j].name
+	})
+
+	for _, f := range files {
+		if totalSize <= a.config.MaxOutputDirBytes {
+			break
+		}
+		if err := os.Remove(f.path); err == nil {
+			log.Printf("Quota: removed old file %s (%d bytes)", f.name, f.size)
+			totalSize -= f.size
+		}
+	}
+}
+
 // writeAggregatedData writes aggregated data as an atomic gzip file.
 // Writes to a .tmp file first, then renames to .json.gz so consumers
 // never see incomplete files.
@@ -280,6 +338,8 @@ func (a *Aggregator) writeAggregatedData() error {
 	if err := os.MkdirAll(a.config.OutputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
+
+	a.enforceOutputQuota()
 
 	ts := time.Now().UTC().Format("20060102_150405")
 	finalPath := fmt.Sprintf("%s/aggregated.%s.json.gz", a.config.OutputDir, ts)
@@ -355,10 +415,12 @@ func main() {
 	// Parse command line flags
 	flag.StringVar(&config.InputLogFile, "input", "/var/log/flow.log", "Input NetFlow log file")
 	flag.StringVar(&config.OutputDir, "output-dir", "/var/log/flows", "Output directory for gzip files")
+	maxOutputMB := flag.Int64("max-output-mb", 500, "Max total size of output dir in MB (0=unlimited)")
 	periodMinutes := flag.Int("period", 5, "Aggregation period in minutes")
 	flag.Parse()
 
 	config.AggregationPeriod = time.Duration(*periodMinutes) * time.Minute
+	config.MaxOutputDirBytes = *maxOutputMB * 1024 * 1024
 
 	// Create and run the aggregator
 	aggregator := NewAggregator(config)
