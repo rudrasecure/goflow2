@@ -381,12 +381,6 @@ func (a *Aggregator) writeAggregatedData() error {
 	log.Printf("Wrote %s (%d records)", finalPath, len(a.aggregatedFlows))
 	a.aggregatedFlows = make(map[string]*AggregatedRecord)
 
-	// Truncate the raw flow log to free disk space
-	if err := os.Truncate(a.config.InputLogFile, 0); err != nil {
-		log.Printf("Warning: failed to truncate input log: %v", err)
-	}
-	a.lastProcessedPos = 0
-
 	return nil
 }
 
@@ -406,6 +400,11 @@ func (a *Aggregator) Run() {
 		if err := a.writeAggregatedData(); err != nil {
 			log.Printf("Error writing aggregated data: %v", err)
 		}
+
+		if err := os.Truncate(a.config.InputLogFile, 0); err != nil {
+			log.Printf("Warning: failed to truncate input log: %v", err)
+		}
+		a.lastProcessedPos = 0
 	}
 }
 
